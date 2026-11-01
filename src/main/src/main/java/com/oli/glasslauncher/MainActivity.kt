@@ -28,6 +28,7 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
 import android.text.Editable
+import android.util.Log
 import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.GestureDetector
@@ -46,6 +47,7 @@ import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextClock
 import android.widget.TextView
 import android.widget.Toast
@@ -184,8 +186,48 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- lifecycle
 
+    private var ok = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val crashFile = File(filesDir, "crash.txt")
+        Thread.setDefaultUncaughtExceptionHandler { _, e ->
+            try {
+                crashFile.writeText(Log.getStackTraceString(e))
+            } catch (_: Throwable) {
+            }
+            android.os.Process.killProcess(android.os.Process.myPid())
+            System.exit(10)
+        }
+        if (crashFile.exists()) {
+            val saved = crashFile.readText()
+            crashFile.delete()
+            showCrash(saved)
+            return
+        }
+        try {
+            setup()
+            ok = true
+        } catch (e: Throwable) {
+            showCrash(Log.getStackTraceString(e))
+        }
+    }
+
+    private fun showCrash(err: String) {
+        val tv = TextView(this).apply {
+            this.text = "Glass Launcher error. Take a screenshot and send it to Claude:\n\n" + err.take(6000)
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setTextIsSelectable(true)
+            setPadding(dp(16), dp(48), dp(16), dp(16))
+        }
+        val sv = ScrollView(this)
+        sv.setBackgroundColor(Color.BLACK)
+        sv.addView(tv)
+        setContentView(sv)
+    }
+
+    private fun setup() {
         if (Build.VERSION.SDK_INT >= 30) {
             window.setDecorFitsSystemWindows(false)
         } else {
@@ -254,6 +296,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (!ok) return
         Thread {
             val list = loadApps()
             runOnUiThread {
@@ -273,7 +316,7 @@ class MainActivity : Activity() {
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-        detector.onTouchEvent(ev)
+        if (ok) detector.onTouchEvent(ev)
         return super.dispatchTouchEvent(ev)
     }
 
@@ -497,129 +540,4 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- wallpaper
 
     private fun showMenu() {
-        AlertDialog.Builder(this)
-            .setItems(arrayOf("Change wallpaper (pick a photo)", "Default wallpaper")) { _, i ->
-                if (i == 0) {
-                    startActivityForResult(
-                        Intent.createChooser(Intent(Intent.ACTION_GET_CONTENT).setType("image/*"), "Photo"), 1
-                    )
-                } else {
-                    File(filesDir, "wall.jpg").delete()
-                    applyWall(loadWall())
-                }
-            }.show()
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        val uri = data?.data
-        if (requestCode == 1 && resultCode == RESULT_OK && uri != null) {
-            saveWall(uri)
-            applyWall(loadWall())
-        }
-    }
-
-    private fun saveWall(uri: Uri) {
-        try {
-            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
-            var s = 1
-            while (max(o.outWidth, o.outHeight) / s > 2400) s *= 2
-            val o2 = BitmapFactory.Options().apply { inSampleSize = s }
-            val bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o2) }
-                ?: return
-            File(filesDir, "wall.jpg").outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-        } catch (e: Exception) {
-            Toast.makeText(this, "Could not load photo", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun applyWall(w: Wall) {
-        wall = w
-        backdrop.invalidate()
-        panels.forEach { it.invalidate() }
-    }
-
-    private fun loadWall(): Wall {
-        val w = dm.widthPixels
-        val h = dm.heightPixels
-        val f = File(filesDir, "wall.jpg")
-        val src = (if (f.exists()) BitmapFactory.decodeFile(f.path) else null) ?: defaultBitmap(w, h)
-        return makeWall(src, w, h)
-    }
-
-    private fun makeWall(src: Bitmap, w: Int, h: Int): Wall {
-        val scale = max(w / src.width.toFloat(), h / src.height.toFloat())
-        val cw = min(src.width, (w / scale).toInt().coerceAtLeast(1))
-        val ch = min(src.height, (h / scale).toInt().coerceAtLeast(1))
-        val x = (src.width - cw) / 2
-        val y = (src.height - ch) / 2
-        val cropped = Bitmap.createBitmap(src, x, y, cw, ch)
-        val sharp = Bitmap.createScaledBitmap(cropped, w, h, true)
-        val small = Bitmap.createScaledBitmap(cropped, max(w / 8, 8), max(h / 8, 8), true)
-        return Wall(sharp, boxBlur(small, 6))
-    }
-
-    private fun defaultBitmap(w: Int, h: Int): Bitmap {
-        val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val c = Canvas(b)
-        val p = Paint()
-        p.shader = LinearGradient(
-            0f, 0f, w.toFloat(), h.toFloat(),
-            intArrayOf(Color.rgb(27, 20, 100), Color.rgb(123, 47, 247), Color.rgb(241, 7, 163)),
-            null, Shader.TileMode.CLAMP
-        )
-        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
-        fun blob(cx: Float, cy: Float, r: Float, rr: Int, gg: Int, bb: Int) {
-            p.shader = RadialGradient(
-                cx, cy, r, Color.argb(200, rr, gg, bb), Color.argb(0, rr, gg, bb), Shader.TileMode.CLAMP
-            )
-            c.drawCircle(cx, cy, r, p)
-        }
-        blob(w * 0.2f, h * 0.25f, w * 0.6f, 0, 200, 255)
-        blob(w * 0.85f, h * 0.55f, w * 0.7f, 255, 140, 60)
-        blob(w * 0.3f, h * 0.85f, w * 0.6f, 80, 255, 170)
-        return b
-    }
-
-    // ---------------------------------------------------------------- blur
-
-    private fun boxBlur(bmp: Bitmap, r: Int): Bitmap {
-        val w = bmp.width
-        val h = bmp.height
-        val px = IntArray(w * h)
-        bmp.getPixels(px, 0, w, 0, 0, w, h)
-        val tmp = IntArray(w * h)
-        repeat(3) {
-            blurPass(px, tmp, w, h, r, true)
-            blurPass(tmp, px, w, h, r, false)
-        }
-        return Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
-    }
-
-    private fun blurPass(src: IntArray, dst: IntArray, w: Int, h: Int, r: Int, horiz: Boolean) {
-        val lines = if (horiz) h else w
-        val len = if (horiz) w else h
-        val n = 2 * r + 1
-        for (l in 0 until lines) {
-            fun idx(i: Int) = if (horiz) l * w + i else i * w + l
-            var rr = 0
-            var gg = 0
-            var bb = 0
-            for (i in -r..r) {
-                val p = src[idx(i.coerceIn(0, len - 1))]
-                rr += (p shr 16) and 255
-                gg += (p shr 8) and 255
-                bb += p and 255
-            }
-            for (i in 0 until len) {
-                dst[idx(i)] = (0xFF shl 24) or ((rr / n) shl 16) or ((gg / n) shl 8) or (bb / n)
-                val add = src[idx((i + r + 1).coerceIn(0, len - 1))]
-                val rem = src[idx((i - r).coerceIn(0, len - 1))]
-                rr += ((add shr 16) and 255) - ((rem shr 16) and 255)
-                gg += ((add shr 8) and 255) - ((rem shr 8) and 255)
-                bb += (add and 255) - (rem and 255)
-            }
-        }
-    }
-}
+     
